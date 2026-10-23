@@ -360,7 +360,11 @@ function Test-Compartilhamentos {
     }
     $sessoes = @(Get-SmbSession -ErrorAction SilentlyContinue)
     if ($sessoes.Count -gt 0) {
-        $clientes = ($sessoes | ForEach-Object { "$($_.ClientComputerName) [$($_.ClientUserName)]" } | Select-Object -Unique) -join ', '
+        $clientes = ($sessoes | ForEach-Object { "$($_.ClientComputerName) [$($_.ClientUserName), SMB $($_.Dialect)]" } | Select-Object -Unique) -join ', '
+        $smb1 = @($sessoes | Where-Object { "$($_.Dialect)" -like '1*' })
+        if ($smb1.Count) { Add-Resultado 'Compartilhamentos' 'Estacoes usando SMBv1' 'Alerta' (($smb1.ClientComputerName | Select-Object -Unique) -join ', ') }
+        $conv = @($sessoes | Where-Object { $_.ClientUserName -match 'Convidado|Guest|ANONYMOUS|AN.NIMO' })
+        if ($conv.Count) { Add-Resultado 'Compartilhamentos' 'Estacoes entrando como Convidado' 'Alerta' ((($conv.ClientComputerName | Select-Object -Unique) -join ', ') + '. Crie um usuario para elas ANTES de desativar o Convidado.') }
         Add-Resultado 'Compartilhamentos' 'Estacoes conectadas agora' 'Info' "$($sessoes.Count): $clientes"
     }
     $cfg = Get-SmbServerConfiguration -ErrorAction SilentlyContinue
@@ -380,8 +384,10 @@ function Test-BancosDados {
         Add-Resultado 'Banco de dados' 'Servicos conhecidos' 'Info' 'Nenhum SQL Server/Firebird/MySQL/PostgreSQL detectado (o sistema pode usar banco proprio; veja a tabela de portas).'
         return
     }
+    $guardianAuto = [bool]($svcs | Where-Object { $_.Name -like 'FirebirdGuardian*' -and $_.StartMode -eq 'Auto' })
     foreach ($s in $svcs) {
         $st = if ($s.State -eq 'Running' -and $s.StartMode -ne 'Auto') { 'Alerta' } else { 'Info' }
+        if ($s.Name -like 'FirebirdServer*' -and $guardianAuto) { $st = 'Info' }
         $obs = if ($st -eq 'Alerta') { ' Inicio NAO automatico: apos reiniciar, as estacoes ficam sem banco.' } else { '' }
         Add-Resultado 'Banco de dados' $s.DisplayName $st "Estado: $($s.State), inicio: $($s.StartMode), conta: $($s.StartName).$obs"
     }
@@ -548,6 +554,8 @@ $(ConvertTo-TabelaHtml $script:Resultados @('Categoria','Item','Status','Detalhe
     $arqHtml = Join-Path $PastaSaida "servidor_${env:COMPUTERNAME}_$Carimbo.html"
     $html | Out-File -FilePath $arqHtml -Encoding utf8
     $script:Resultados | Export-Csv -Path (Join-Path $PastaSaida "servidor_${env:COMPUTERNAME}_$Carimbo.csv") -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    $Escuta | Where-Object { -not $_.Sistema } | Select-Object Porta, Descricao, Processo, Servicos, Estacoes, Firewall, Caminho |
+        Export-Csv -Path (Join-Path $PastaSaida "servidor_portas_${env:COMPUTERNAME}_$Carimbo.csv") -NoTypeInformation -Encoding UTF8 -Delimiter ';'
     return $arqHtml
 }
 
