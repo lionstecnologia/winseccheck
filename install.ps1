@@ -19,16 +19,6 @@
     $Destino      = Join-Path $env:ProgramData 'WinSecCheck\app\WinSecCheck.ps1'
     $ArgsRepassar = @($args)
 
-    # -Servidor: baixa e executa a varredura de servidor (WinSecServer.ps1)
-    if ($ArgsRepassar -contains '-Servidor') {
-        $UrlScript    = $UrlServidor
-        $HashEsperado = $HashServidor
-        $Destino      = Join-Path $env:ProgramData 'WinSecCheck\app\WinSecServer.ps1'
-        $ArgsSemFlag  = @($ArgsRepassar | Where-Object { $_ -ne '-Servidor' })
-    } else {
-        $ArgsSemFlag  = $ArgsRepassar
-    }
-
     # TLS 1.2 (necessario em Windows/PowerShell mais antigos)
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
@@ -50,6 +40,38 @@
         $codificado = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($comando))
         Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -NoExit -EncodedCommand $codificado"
         return
+    }
+
+    # ---- Deteccao automatica: servidor ou estacao ----
+    # -Servidor forca a varredura de servidor; -Estacao forca o WinSecCheck.
+    $modoServidor = $false
+    if ($ArgsRepassar -contains '-Servidor') {
+        $modoServidor = $true
+    } elseif ($ArgsRepassar -notcontains '-Estacao') {
+        $os = Get-CimInstance Win32_OperatingSystem
+        if ($os.ProductType -ne 1) {
+            Write-Host "Windows Server detectado ($($os.Caption)): executando a varredura de SERVIDOR (somente leitura)." -ForegroundColor Yellow
+            $modoServidor = $true
+        } else {
+            # Windows de estacao que pode estar atuando como servidor
+            $bancos = @(Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(MSSQL|Firebird|MySQL|MariaDB|postgresql|OracleService|MongoDB)' })
+            $pastas = @(Get-SmbShare -ErrorAction SilentlyContinue | Where-Object { -not $_.Special -and $_.Name -notmatch '\$$' })
+            if (($bancos.Count -gt 0 -or $pastas.Count -gt 0) -and $ArgsRepassar.Count -eq 0) {
+                Write-Host 'Este computador parece atuar como SERVIDOR:' -ForegroundColor Yellow
+                if ($bancos.Count) { Write-Host "  Bancos de dados: $(($bancos.DisplayName) -join ', ')" -ForegroundColor Yellow }
+                if ($pastas.Count) { Write-Host "  Pastas compartilhadas: $(($pastas.Name) -join ', ')" -ForegroundColor Yellow }
+                $resp = Read-Host 'Executar a varredura de SERVIDOR (recomendado, nao altera nada)? [S/N]'
+                $modoServidor = ($resp -match '^(s|sim|y|yes)$')
+            }
+        }
+    }
+    $ArgsSemFlag = @($ArgsRepassar | Where-Object { $_ -notin '-Servidor', '-Estacao' })
+
+    # Servidor: baixa e executa a varredura de servidor (WinSecServer.ps1)
+    if ($modoServidor) {
+        $UrlScript    = $UrlServidor
+        $HashEsperado = $HashServidor
+        $Destino      = Join-Path $env:ProgramData 'WinSecCheck\app\WinSecServer.ps1'
     }
 
     # ---- Download do script principal (como arquivo, sem corromper) ----
