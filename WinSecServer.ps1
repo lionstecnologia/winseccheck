@@ -237,7 +237,10 @@ function Invoke-AnaliseFirewall($Escuta, $Observadas) {
         if ($e.Sistema) { $e.Firewall = 'Sistema (ignorada)'; $e.Classe = 'OK'; continue }
 
         $desc = if ($e.Descricao) { $e.Descricao } else { $e.Processo }
-        $usada = ($est.Count -gt 0) -or ($e.Porta -eq 445 -and $script:TemCompartilhamentos)
+        # Bancos de dados e compartilhamentos sao sempre liberados (na rede local), mesmo sem uso observado:
+        # a observacao pode ocorrer fora do expediente e bloquear o banco pararia o sistema.
+        $portaBanco = $e.Porta -in 1433, 1521, 3050, 3306, 5432, 27017
+        $usada = ($est.Count -gt 0) -or ($e.Porta -eq 445 -and $script:TemCompartilhamentos) -or $portaBanco
         $regra = Find-RegraQueLibera -Porta $e.Porta -Caminho $e.Caminho -Perfis $perfisAtivos -Regras $regras
         $abertaGeral = $regra -and (($regra.Origem -join ',') -match 'Any')
 
@@ -272,7 +275,7 @@ function Invoke-AnaliseFirewall($Escuta, $Observadas) {
         $cmd = "New-NetFirewallRule -DisplayName '$nomeRegra' -Group 'WinSecServer' -Direction Inbound -Action Allow -Protocol TCP -LocalPort $($e.Porta) -RemoteAddress $origTxt -Profile Any$prog | Out-Null"
 
         if ($usada) {
-            $quem = if ($e.Estacoes) { $e.Estacoes } else { 'compartilhamentos de rede' }
+            $quem = if ($e.Estacoes) { $e.Estacoes } elseif ($portaBanco) { 'banco de dados (liberado por padrao na rede local)' } else { 'compartilhamentos de rede' }
             $linhas.Add("# $desc ($($e.Processo)) - usada por: $quem")
             $linhas.Add($cmd)
         } else {
