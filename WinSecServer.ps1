@@ -484,11 +484,36 @@ function Test-Backup {
     Add-Resultado 'Backup' 'Recomendacao' 'Info' 'Garanta uma copia fora do servidor (nuvem ou disco desconectado) e teste a restauracao do banco periodicamente: ransomware criptografa tambem os backups acessiveis pela rede.'
 }
 
+function Test-ProtecaoEDisco {
+    Write-Etapa 'Antivirus e disco'
+    $mp = $null
+    try { $mp = Get-MpComputerStatus -ErrorAction Stop } catch {}
+    if ($mp -and $mp.AntivirusEnabled) {
+        Add-Resultado 'Antivirus' 'Microsoft Defender' 'OK' "Ativo. Assinaturas com $($mp.AntivirusSignatureAge) dia(s)."
+    } else {
+        $av = @(Get-CimInstance Win32_Service | Where-Object {
+            $_.State -eq 'Running' -and "$($_.Name) $($_.DisplayName)" -match 'Kaspersky|ESET|ekrn|Bitdefender|Sophos|Trend Micro|Symantec|Norton|McAfee|Avast|AVG|Avira|Panda|Webroot|SentinelOne|CrowdStrike|Malwarebytes|Endpoint Protection|MsMpSvc|WinDefend'
+        })
+        if ($av.Count) { Add-Resultado 'Antivirus' 'Produto em execucao' 'OK' (($av.DisplayName | Select-Object -Unique) -join ', ') }
+        else { Add-Resultado 'Antivirus' 'Protecao' 'Critico' 'Nenhum antivirus ativo detectado. Instale uma solucao compativel com este Windows e configure exclusoes para as pastas dos bancos de dados.' }
+    }
+    foreach ($d in Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3') {
+        if (-not $d.Size) { continue }
+        $pct = [math]::Round(($d.FreeSpace / $d.Size) * 100, 1)
+        $gb = [math]::Round($d.FreeSpace / 1GB, 1)
+        $st = if ($pct -lt 15) { 'Alerta' } else { 'OK' }
+        Add-Resultado 'Disco' "Unidade $($d.DeviceID)" $st "$gb GB livres ($pct%)"
+    }
+    $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+    $st = if ($ram -lt 8) { 'Alerta' } else { 'OK' }
+    Add-Resultado 'Desempenho' 'Memoria RAM' $st "$ram GB. Para servidor com banco de dados, recomendado 8 GB ou mais."
+}
+
 # =====================================================================
 #  RELATORIO
 # =====================================================================
 function ConvertTo-TabelaHtml($Objetos, [string[]]$Colunas, [string]$CampoClasse) {
-    $lista = @($Objetos)
+    $lista = if ($null -eq $Objetos) { @() } else { @($Objetos | ForEach-Object { $_ }) }
     if ($lista.Count -eq 0) { return '<p><i>Nenhum item.</i></p>' }
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append('<div class="rolagem"><table><tr>')
@@ -536,7 +561,7 @@ $(ConvertTo-TabelaHtml $Observadas @('Estacao','Nome','Porta','PrimeiraVez','Amo
 <h2>2. Portas abertas e situacao no firewall</h2>
 $(ConvertTo-TabelaHtml ($Escuta | Where-Object { -not $_.Sistema }) @('Porta','Descricao','Processo','Servicos','Estacoes','Firewall','Caminho') 'Classe')
 <h2>3. Verificacoes</h2>
-$(ConvertTo-TabelaHtml $script:Resultados @('Categoria','Item','Status','Detalhe') 'Status')
+$(ConvertTo-TabelaHtml $script:Resultados.ToArray() @('Categoria','Item','Status','Detalhe') 'Status')
 <h2>4. Plano seguro (sem prejudicar as estacoes)</h2>
 <ol>
 <li><b>Revise o script de regras gerado</b>: <code>$ArquivoRegras</code>. Ele libera as portas usadas apenas para a rede local. Aplique-o, teste as estacoes e so entao mantenha o firewall ligado. Para desfazer: <code>Remove-NetFirewallRule -Group 'WinSecServer'</code>.</li>
@@ -590,6 +615,7 @@ Test-BancosDados
 Test-ContasEServicos
 Test-AcessoRemoto
 Test-Backup
+Test-ProtecaoEDisco
 $linhasRegras = Invoke-AnaliseFirewall -Escuta $escuta -Observadas $observadas
 
 # Script de regras de firewall
@@ -603,6 +629,12 @@ $cab.Add("  Para desfazer tudo:  Remove-NetFirewallRule -Group 'WinSecServer'")
 $cab.Add('#>')
 $cab.Add('#Requires -RunAsAdministrator')
 $cab.Add("Remove-NetFirewallRule -Group 'WinSecServer' -ErrorAction SilentlyContinue")
+$cab.Add('')
+$cab.Add('# Basico da rede local: ping e resolucao de nome NetBIOS (estacoes acham o servidor pelo nome)')
+$cab.Add("New-NetFirewallRule -DisplayName 'WinSecServer - Ping' -Group 'WinSecServer' -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -RemoteAddress 'LocalSubnet' -Profile Any | Out-Null")
+if ($script:TemCompartilhamentos) {
+    $cab.Add("New-NetFirewallRule -DisplayName 'WinSecServer - NetBIOS - UDP 137-138' -Group 'WinSecServer' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 137,138 -RemoteAddress 'LocalSubnet' -Profile Any | Out-Null")
+}
 $cab.Add('')
 foreach ($ifc in ($script:RedePublica | Select-Object -Unique)) {
     $cab.Add("# Rede marcada como Publica. Remova o '#' para marcar como Privada (rede interna):")
