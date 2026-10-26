@@ -532,8 +532,44 @@ function ConvertTo-TabelaHtml($Objetos, [string[]]$Colunas, [string]$CampoClasse
     return $sb.ToString()
 }
 
+function Get-Evolucao {
+    $anterior = Get-ChildItem $PastaSaida -Filter "servidor_${env:COMPUTERNAME}_*.csv" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $anterior) { return $null }
+    $peso = @{ OK = 0; Info = 0; Alerta = 1; Critico = 2 }
+    $ant = @{}; Import-Csv $anterior.FullName -Delimiter ';' | ForEach-Object { $ant["$($_.Categoria) / $($_.Item)"] = $_.Status }
+    $atu = @{}; foreach ($r in $script:Resultados) { $atu["$($r.Categoria) / $($r.Item)"] = $r.Status }
+    $lista = New-Object System.Collections.Generic.List[object]
+    foreach ($k in $atu.Keys) {
+        if ($ant.ContainsKey($k)) {
+            $pa = $peso[$ant[$k]]; $pn = $peso[$atu[$k]]
+            if ($pa -gt $pn)     { $lista.Add([pscustomobject]@{ Item = $k; Antes = $ant[$k]; Agora = $atu[$k]; Situacao = 'Melhorou'; Classe = 'OK' }) }
+            elseif ($pn -gt $pa) { $lista.Add([pscustomobject]@{ Item = $k; Antes = $ant[$k]; Agora = $atu[$k]; Situacao = 'Piorou'; Classe = 'Critico' }) }
+        } elseif ($peso[$atu[$k]] -gt 0) {
+            $lista.Add([pscustomobject]@{ Item = $k; Antes = '-'; Agora = $atu[$k]; Situacao = 'Novo problema'; Classe = 'Alerta' })
+        }
+    }
+    foreach ($k in $ant.Keys) {
+        if (-not $atu.ContainsKey($k) -and $peso[$ant[$k]] -gt 0) {
+            $lista.Add([pscustomobject]@{ Item = $k; Antes = $ant[$k]; Agora = '-'; Situacao = 'Resolvido'; Classe = 'OK' })
+        }
+    }
+    [pscustomobject]@{ Data = $anterior.LastWriteTime.ToString('dd/MM/yyyy HH:mm'); Mudancas = $lista.ToArray() }
+}
+
 function Export-Relatorio($Escuta, $Observadas, [string]$ArquivoRegras) {
     $os = Get-CimInstance Win32_OperatingSystem
+    $evo = Get-Evolucao
+    if (-not $evo) {
+        $htmlEvo = '<p><i>Primeira varredura deste servidor: nao ha com o que comparar.</i></p>'
+    } elseif (@($evo.Mudancas).Count -eq 0) {
+        $htmlEvo = "<p style='background:#fff8e1;padding:10px;border-radius:4px'><b>Nenhuma mudanca desde a varredura de $($evo.Data).</b> A varredura apenas diagnostica; para melhorar o resultado e preciso aplicar as correcoes (scripts de correcao e de firewall).</p>"
+        Write-Host "`nNenhuma mudanca desde a varredura de $($evo.Data). Aplique as correcoes para melhorar o resultado." -ForegroundColor Yellow
+    } else {
+        $htmlEvo = "<p>Comparado com a varredura de $($evo.Data):</p>" + (ConvertTo-TabelaHtml $evo.Mudancas @('Item','Antes','Agora','Situacao') 'Classe')
+        Write-Host "`nEvolucao desde $($evo.Data):" -ForegroundColor Cyan
+        $evo.Mudancas | ForEach-Object { Write-Host "  [$($_.Situacao)] $($_.Item): $($_.Antes) -> $($_.Agora)" }
+    }
     $c = @($script:Resultados | Where-Object Status -eq 'Critico').Count
     $a = @($script:Resultados | Where-Object Status -eq 'Alerta').Count
     $obsTxt = if ($MinutosObservacao -gt 0) { "$MinutosObservacao minuto(s)" } else { 'instantanea' }
@@ -559,6 +595,8 @@ li{margin-bottom:8px}code{background:#eceff1;padding:2px 5px;border-radius:3px}
 <div class="card"><b>$(@($Observadas | ForEach-Object { $_.Estacao } | Select-Object -Unique).Count)</b>Estacoes observadas</div>
 <div class="card"><b>$(@($Escuta | Where-Object { -not $_.Sistema }).Count)</b>Portas de aplicativos</div>
 </div>
+<h2>Evolucao</h2>
+$htmlEvo
 <h2>1. Estacoes que acessaram o servidor</h2>
 $(ConvertTo-TabelaHtml $Observadas @('Estacao','Nome','Porta','PrimeiraVez','Amostras'))
 <h2>2. Portas abertas e situacao no firewall</h2>
