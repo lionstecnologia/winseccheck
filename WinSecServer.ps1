@@ -373,6 +373,21 @@ function Test-Compartilhamentos {
         if ($conv.Count) { Add-Resultado 'Compartilhamentos' 'Estacoes entrando como Convidado' 'Alerta' ((($conv.ClientComputerName | Select-Object -Unique) -join ', ') + '. Crie um usuario para elas ANTES de desativar o Convidado.') }
         Add-Resultado 'Compartilhamentos' 'Estacoes conectadas agora' 'Info' "$($sessoes.Count): $clientes"
     }
+    $mon = Join-Path $PastaSaida 'monitor_smb.csv'
+    if (Test-Path $mon) {
+        $dados = @(Import-Csv $mon -Delimiter ';')
+        if ($dados.Count) {
+            $periodo = "$(($dados | Select-Object -First 1).Data) a $(($dados | Select-Object -Last 1).Data)"
+            $quem = ($dados | Group-Object Estacao, Usuario, Dialeto | ForEach-Object { "$($_.Name) [$($_.Count)x]" }) -join '; '
+            Add-Resultado 'Compartilhamentos' 'Monitor de acessos' 'Info' "Periodo $periodo. $quem"
+            $conv = @($dados | Where-Object { $_.Usuario -match 'Convidado|Guest|AN.NIMO|ANONYMOUS' } | ForEach-Object { $_.Estacao } | Select-Object -Unique)
+            if ($conv.Count) { Add-Resultado 'Compartilhamentos' 'Monitor: uso do Convidado' 'Alerta' "Estacoes que entram como Convidado: $($conv -join ', '). Crie um usuario para elas antes de desativar o Convidado." }
+            else { Add-Resultado 'Compartilhamentos' 'Monitor: uso do Convidado' 'OK' "Nenhuma estacao entrou como Convidado no periodo $periodo." }
+            $v1 = @($dados | Where-Object { $_.Dialeto -like '1*' } | ForEach-Object { $_.Estacao } | Select-Object -Unique)
+            if ($v1.Count) { Add-Resultado 'Compartilhamentos' 'Monitor: uso do SMBv1' 'Alerta' "Estacoes usando SMBv1: $($v1 -join ', ')." }
+            else { Add-Resultado 'Compartilhamentos' 'Monitor: uso do SMBv1' 'OK' "Nenhuma estacao usou SMBv1 no periodo $periodo." }
+        }
+    }
     $cfg = Get-SmbServerConfiguration -ErrorAction SilentlyContinue
     if ($cfg) {
         if ($cfg.EnableSMB1Protocol) { Add-Resultado 'Compartilhamentos' 'SMBv1' 'Critico' 'Habilitado. Verifique se ha estacoes muito antigas antes de desativar.' }
@@ -401,7 +416,27 @@ function Test-BancosDados {
     if ($nomes -match 'Firebird') { Add-Resultado 'Banco de dados' 'Firebird - senha padrao' 'Alerta' "Confirme com o fornecedor do sistema se a senha do SYSDBA ainda e a padrao 'masterkey' e troque em conjunto com ele." }
     if ($nomes -match 'MSSQL')    { Add-Resultado 'Banco de dados' 'SQL Server - conta sa' 'Alerta' "Confirme se a conta 'sa' tem senha forte ou esta desativada (alinhe com o fornecedor)." }
     if ($nomes -match 'MySQL|MariaDB') { Add-Resultado 'Banco de dados' 'MySQL - conta root' 'Alerta' "Confirme se o 'root' tem senha forte e so aceita conexao local." }
-    if ($nomes -match 'postgresql') { Add-Resultado 'Banco de dados' 'PostgreSQL' 'Alerta' "Revise o pg_hba.conf: aceite conexoes apenas da rede local." }
+    if ($nomes -match 'postgresql') {
+        $pg = $svcs | Where-Object { $_.Name -like 'postgresql*' } | Select-Object -First 1
+        $dir = $null
+        if ($pg.PathName -match '-D\s+"([^"]+)"') { $dir = $Matches[1] } elseif ($pg.PathName -match '-D\s+(\S+)') { $dir = $Matches[1] }
+        $hba = if ($dir) { Join-Path $dir 'pg_hba.conf' } else { $null }
+        if ($hba -and (Test-Path $hba)) {
+            $semSenha = @(); $qualquerIP = @()
+            foreach ($l in Get-Content $hba | Where-Object { $_ -match '^\s*host' }) {
+                $c = -split $l
+                $end = $c[3]
+                $met = if ($end -match '^\d+\.\d+\.\d+\.\d+$') { $c[5] } else { $c[4] }
+                if ($met -eq 'trust' -and $end -notmatch '^(127\.0\.0\.1/32|::1/128)$') { $semSenha += $end }
+                elseif ($end -in '0.0.0.0/0', '::/0', 'all') { $qualquerIP += "$end ($met)" }
+            }
+            if ($semSenha.Count) { Add-Resultado 'Banco de dados' 'PostgreSQL - pg_hba.conf' 'Critico' "Aceita conexao SEM SENHA (trust) de: $($semSenha -join ', '). Corrija com o fornecedor do ProDoctor." }
+            elseif ($qualquerIP.Count) { Add-Resultado 'Banco de dados' 'PostgreSQL - pg_hba.conf' 'Alerta' "Aceita qualquer IP: $($qualquerIP -join ', '). O firewall compensa; com o fornecedor, restrinja a rede local." }
+            else { Add-Resultado 'Banco de dados' 'PostgreSQL - pg_hba.conf' 'OK' 'Conexoes restritas e com senha.' }
+        } else {
+            Add-Resultado 'Banco de dados' 'PostgreSQL - pg_hba.conf' 'Alerta' 'Arquivo nao localizado. Revise com o fornecedor: aceite conexoes apenas da rede local.'
+        }
+    }
 }
 
 function Test-ContasEServicos {
@@ -536,7 +571,7 @@ function ConvertTo-TabelaHtml($Objetos, [string[]]$Colunas, [string]$CampoClasse
 }
 
 function Get-Evolucao {
-    $anterior = Get-ChildItem $PastaSaida -Filter "servidor_${env:COMPUTERNAME}_*.csv" -ErrorAction SilentlyContinue |
+    $anterior = Get-ChildItem -Path (Join-Path $PastaSaida 'historico'), $PastaSaida -Filter "servidor_${env:COMPUTERNAME}_*.csv" -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $anterior) { return $null }
     $peso = @{ OK = 0; Info = 0; Alerta = 1; Critico = 2 }
@@ -622,7 +657,11 @@ $(ConvertTo-TabelaHtml $script:Resultados.ToArray() @('Categoria','Item','Status
 "@
     $arqHtml = Join-Path $PastaSaida "servidor_${env:COMPUTERNAME}_$Carimbo.html"
     $html | Out-File -FilePath $arqHtml -Encoding utf8
-    $script:Resultados | Export-Csv -Path (Join-Path $PastaSaida "servidor_${env:COMPUTERNAME}_$Carimbo.csv") -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    $arqCsv = Join-Path $PastaSaida "servidor_${env:COMPUTERNAME}_$Carimbo.csv"
+    $script:Resultados | Export-Csv -Path $arqCsv -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    $hist = Join-Path $PastaSaida 'historico'
+    if (-not (Test-Path $hist)) { New-Item -ItemType Directory -Path $hist -Force | Out-Null }
+    Copy-Item $arqCsv $hist -Force -ErrorAction SilentlyContinue
     $Escuta | Where-Object { -not $_.Sistema } | Select-Object Porta, Descricao, Processo, Servicos, Estacoes, Firewall, Caminho |
         Export-Csv -Path (Join-Path $PastaSaida "servidor_portas_${env:COMPUTERNAME}_$Carimbo.csv") -NoTypeInformation -Encoding UTF8 -Delimiter ';'
     return $arqHtml
